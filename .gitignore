@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+
+input_audio/*
+!input_audio/.gitkeep
+
+output/*
+!output/.gitkeep

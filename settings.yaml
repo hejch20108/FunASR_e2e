@@ -1,0 +1,62 @@
+# FunASR_e2e 端到端流程配置文件。
+# 所有相对路径均相对于 FunASR_e2e 项目根目录解析。
+
+paths:
+  # 待处理音频目录。batch 模式下会扫描该目录。
+  input_audio_dir: input_audio
+  # 输出目录。默认每个音频会在 output 下创建独立子目录。
+  output_dir: output
+  # API 密钥配置文件。
+  env_file: .env
+  # 清洗规则和 LLM prompt 所在目录。
+  prompt_dir: prompt
+
+audio:
+  # batch: 处理 input_audio_dir 下所有支持格式音频。
+  # single: 只处理 input_audio_file 指定的单个音频。
+  mode: batch
+  # 指定单个音频；为空时扫描 input_audio_dir。
+  input_audio_file: null
+  supported_extensions:
+    - .wav
+    - .mp3
+    - .m4a
+    - .flac
+    - .aac
+    - .ogg
+
+funasr:
+  model: iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
+  vad_model: iic/speech_fsmn_vad_zh-cn-16k-common-pytorch
+  punc_model: iic/punc_ct-transformer_cn-en-common-vocab471067-large
+  spk_model: iic/speech_campplus_sv_zh-cn_16k-common
+  # cuda / cpu / mps / xpu / npu。无 GPU 时可改为 cpu。
+  device: cuda
+  batch_size_s: 300
+  batch_size_threshold_s: 60
+  max_single_segment_time: 60000
+
+postprocess:
+  max_gap_ms: 2000
+  max_chars: 400
+  speaker_prefix: 说话人
+  keep_time: true
+
+llm:
+  skip_polish: false
+  provider: dashscope
+  # 为空时读取 .env 中的 MODEL_NAME；仍为空则使用 qwen3-max。
+  model: null
+  chunk_size: 40
+  max_workers: 3
+  enable_thinking: false
+  api_key_env: API_KEY
+  base_url_env: BASE_URL
+  model_name_env: MODEL_NAME
+  polished_suffix: _polished
+
+output:
+  # true: 每个音频输出到 output/<音频名>/，避免多音频结果混在一起。
+  per_audio_subdir: true
+  # true: 已存在同名输出时覆盖。
+  overwrite: true
