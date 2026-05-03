@@ -21,10 +21,10 @@
 在新 Linux 服务器上：
 
 ```bash
-git clone https://github.com/modelscope/FunASR.git
-cd FunASR
-git clone https://github.com/hejch20108/FunASR_e2e.git
-cd FunASR_e2e
+git clone https://github.com/modelscope/FunASR.git && \
+cd FunASR && \
+git clone https://github.com/hejch20108/FunASR_e2e.git && \
+cd FunASR_e2e && \
 cp .env.example .env
 ```
 
@@ -37,7 +37,7 @@ cp .env.example .env
 ### 3.1 安装 uv
 
 ```bash
-sudo apt update && sudo apt install -y python3-pip
+sudo apt update && sudo apt install -y python3-pip && \
 pip install uv
 ```
 
@@ -46,7 +46,7 @@ pip install uv
 在 `FunASR_e2e` 目录中执行：
 
 ```bash
-uv venv --python 3.10 .venv
+uv venv --python 3.11 .venv && \
 source .venv/bin/activate
 ```
 
@@ -69,14 +69,14 @@ uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 `FunASR_e2e` 位于外层 `FunASR` 目录内，所以执行：
 
 ```bash
-uv pip install -e ../
+uv pip install -e ../  && \
 uv pip install -U modelscope huggingface_hub soundfile librosa jieba pyyaml
 ```
 
 如果系统缺少音频库，Ubuntu/Debian 可执行：
 
 ```bash
-sudo apt update
+sudo apt update && \
 sudo apt install -y ffmpeg libsndfile1
 ```
 
