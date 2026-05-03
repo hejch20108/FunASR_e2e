@@ -37,8 +37,8 @@ cp .env.example .env
 ### 3.1 安装 uv
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc
+sudo apt update && sudo apt install -y python3-pip
+pip install uv
 ```
 
 ### 3.2 创建虚拟环境
@@ -192,14 +192,16 @@ funasr:
 ```yaml
 llm:
   skip_polish: false
-  chunk_size: 40
-  max_workers: 3
+  chunk_size: 20
+  max_workers: 8
+  max_retries: 3
   enable_thinking: false
 ```
 
 - `skip_polish: true`：只生成 `.json` 和 `_cleaned.txt`。
 - `chunk_size`：每次给大模型的段落数。
 - `max_workers`：大模型并行请求数。
+- `max_retries`：单个润色分块失败或格式校验不通过时的最大重试次数。
 - `enable_thinking`：是否开启思考模式；开启会显著变慢，默认关闭。
 
 ## 9. 修改清洗规则和提示词
@@ -307,14 +309,14 @@ DASHSCOPE_API_KEY=your_api_key_here
 
 ### LLM 段落数不一致
 
-脚本会校验输入和输出段落数。如果报错，可尝试：
+润色阶段只让大模型处理正文，脚本会原样拼回时间戳和说话人，并校验输入和输出段落数。如果仍然报错，可尝试降低分块大小：
 
 ```yaml
 llm:
-  chunk_size: 20
+  chunk_size: 10
 ```
 
-也可以收紧 `prompt/polish_prompt_template.txt`，强调不得合并或删除段落。
+也可以收紧 `prompt/polish_prompt_template.txt`，强调不得合并、删除或新增 segment。
 
 ### 请求太慢
 
@@ -329,5 +331,7 @@ llm:
 
 ```yaml
 llm:
-  max_workers: 5
+  max_workers: 8
 ```
+
+如果出现限流、超时或连接重置，可降低到 `5`。

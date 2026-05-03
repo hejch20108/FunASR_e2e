@@ -1,6 +1,26 @@
 .env
+.env.*
+!.env.example
+
+.claude/
+.venv/
+venv/
+env/
+
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+build/
+dist/
+*.egg-info/
+
 .DS_Store
 *.log
 

@@ -36,6 +36,12 @@ class TextCleaningConfig:
     filler_words: list[str]
 
 
+@dataclass
+class PolishBlock:
+    header: str
+    text: str
+
+
 def load_word_list(path: Path) -> list[str]:
     if not path.exists():
         raise FileNotFoundError(f"词表文件不存在：{path}")
@@ -212,14 +218,77 @@ def split_transcript_blocks(transcript: str) -> list[str]:
     return [block.strip() for block in re.split(r"\n{2,}", transcript.strip()) if block.strip()]
 
 
-def chunk_blocks(blocks: list[str], chunk_size: int) -> list[list[str]]:
+def parse_transcript_block(block: str, block_index: int) -> PolishBlock:
+    lines = block.splitlines()
+    if len(lines) < 2:
+        raise ValueError(f"第 {block_index} 段格式错误，必须包含段落头和正文：{block[:80]}")
+
+    header = lines[0].strip()
+    text = "\n".join(line.strip() for line in lines[1:]).strip()
+    if not re.match(r"^\[.+? - .+?\] .+：$", header):
+        raise ValueError(f"第 {block_index} 段段落头格式错误：{header}")
+    if not text:
+        raise ValueError(f"第 {block_index} 段正文为空：{header}")
+    return PolishBlock(header=header, text=text)
+
+
+def parse_transcript_blocks(transcript: str) -> list[PolishBlock]:
+    return [
+        parse_transcript_block(block, index)
+        for index, block in enumerate(split_transcript_blocks(transcript), start=1)
+    ]
+
+
+def chunk_blocks(blocks: list[PolishBlock], chunk_size: int) -> list[list[PolishBlock]]:
     if chunk_size <= 0:
         raise ValueError("chunk_size 必须大于 0")
     return [blocks[index : index + chunk_size] for index in range(0, len(blocks), chunk_size)]
 
 
+def render_polish_input(chunk: list[PolishBlock]) -> str:
+    return "\n\n".join(
+        f"<<<SEGMENT {index}>>>\n{block.text}"
+        for index, block in enumerate(chunk, start=1)
+    )
+
+
 def build_polish_prompt(chunk_text: str, prompt_template: str) -> str:
     return prompt_template.replace("{{ chunk_text }}", chunk_text)
+
+
+def parse_polished_texts(response: str, expected_count: int) -> list[str]:
+    pattern = re.compile(r"(?m)^<<<SEGMENT (\d+)>>>\s*$")
+    matches = list(pattern.finditer(response.strip()))
+    if len(matches) != expected_count:
+        raise ValueError(f"润色输出分段数量不一致：输入 {expected_count}，输出 {len(matches)}")
+
+    polished_by_index: dict[int, str] = {}
+    for position, match in enumerate(matches):
+        segment_index = int(match.group(1))
+        next_start = matches[position + 1].start() if position + 1 < len(matches) else len(response.strip())
+        text = response.strip()[match.end():next_start].strip()
+        if segment_index in polished_by_index:
+            raise ValueError(f"润色输出分段编号重复：{segment_index}")
+        if not text:
+            raise ValueError(f"润色输出分段正文为空：{segment_index}")
+        if re.match(r"^\[.+? - .+?\] .+：", text):
+            raise ValueError(f"润色输出不应包含时间戳或说话人标签：{segment_index}")
+        polished_by_index[segment_index] = text
+
+    expected_indexes = list(range(1, expected_count + 1))
+    actual_indexes = sorted(polished_by_index)
+    if actual_indexes != expected_indexes:
+        raise ValueError(f"润色输出分段编号不连续：期望 {expected_indexes}，实际 {actual_indexes}")
+    return [polished_by_index[index] for index in expected_indexes]
+
+
+def assemble_polished_chunk(chunk: list[PolishBlock], polished_texts: list[str]) -> str:
+    if len(chunk) != len(polished_texts):
+        raise ValueError(f"拼回段落数不一致：输入 {len(chunk)}，输出 {len(polished_texts)}")
+    return "\n\n".join(
+        f"{block.header}\n{polished_text}"
+        for block, polished_text in zip(chunk, polished_texts)
+    )
 
 
 def load_env_file(env_path: Path) -> None:
@@ -295,29 +364,35 @@ def count_timestamp_blocks(text: str) -> int:
 def polish_chunk(
     index: int,
     total: int,
-    chunk: list[str],
+    chunk: list[PolishBlock],
     base_url: str,
     api_key: str,
     model: str,
     enable_thinking: bool,
     prompt_template: str,
+    max_retries: int,
 ) -> tuple[int, str]:
     print(f"正在润色分块 {index}/{total}，段落数：{len(chunk)}", flush=True)
-    prompt = build_polish_prompt("\n\n".join(chunk), prompt_template)
-    polished = call_openai_compatible_chat(
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        prompt=prompt,
-        enable_thinking=enable_thinking,
-    )
-    expected_blocks = len(chunk)
-    actual_blocks = count_timestamp_blocks(polished)
-    if actual_blocks != expected_blocks:
-        raise RuntimeError(
-            f"分块 {index}/{total} 润色后段落数不一致：输入 {expected_blocks}，输出 {actual_blocks}"
-        )
-    return index, polished
+    prompt = build_polish_prompt(render_polish_input(chunk), prompt_template)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = call_openai_compatible_chat(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                prompt=prompt,
+                enable_thinking=enable_thinking,
+            )
+            polished_texts = parse_polished_texts(response, len(chunk))
+            return index, assemble_polished_chunk(chunk, polished_texts)
+        except Exception as error:
+            last_error = error
+            if attempt < max_retries:
+                print(f"分块 {index}/{total} 第 {attempt} 次润色失败，准备重试：{error}", flush=True)
+
+    raise RuntimeError(f"分块 {index}/{total} 润色失败，已重试 {max_retries} 次：{last_error}") from last_error
 
 
 def write_polished_transcript(
@@ -329,14 +404,17 @@ def write_polished_transcript(
     model: str,
     enable_thinking: bool,
     max_workers: int,
+    max_retries: int,
     prompt_template: str,
 ) -> int:
     transcript = source_path.read_text(encoding="utf-8")
-    blocks = split_transcript_blocks(transcript)
+    blocks = parse_transcript_blocks(transcript)
     if not blocks:
         raise ValueError(f"没有从润色输入中解析到段落：{source_path}")
     if max_workers <= 0:
         raise ValueError("max_workers 必须大于 0")
+    if max_retries <= 0:
+        raise ValueError("max_retries 必须大于 0")
 
     chunks = chunk_blocks(blocks, chunk_size)
     polished_chunks: dict[int, str] = {}
@@ -344,7 +422,7 @@ def write_polished_transcript(
     if workers == 1:
         for index, chunk in enumerate(chunks, start=1):
             chunk_index, polished = polish_chunk(
-                index, len(chunks), chunk, base_url, api_key, model, enable_thinking, prompt_template
+                index, len(chunks), chunk, base_url, api_key, model, enable_thinking, prompt_template, max_retries
             )
             polished_chunks[chunk_index] = polished
     else:
@@ -361,6 +439,7 @@ def write_polished_transcript(
                     model,
                     enable_thinking,
                     prompt_template,
+                    max_retries,
                 )
                 for index, chunk in enumerate(chunks, start=1)
             ]

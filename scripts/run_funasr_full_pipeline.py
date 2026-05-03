@@ -65,8 +65,9 @@ def default_settings() -> dict[str, Any]:
             "skip_polish": False,
             "provider": "dashscope",
             "model": None,
-            "chunk_size": 40,
-            "max_workers": 3,
+            "chunk_size": 20,
+            "max_workers": 8,
+            "max_retries": 3,
             "enable_thinking": False,
             "api_key_env": "API_KEY",
             "base_url_env": "BASE_URL",
@@ -273,6 +274,7 @@ def process_one_audio(
         model=llm_model,
         enable_thinking=llm_config["enable_thinking"],
         max_workers=llm_config["max_workers"],
+        max_retries=llm_config["max_retries"],
         prompt_template=prompt_template,
     )
     print(f"LLM provider：{llm_config['provider']}", flush=True)

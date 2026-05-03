@@ -47,8 +47,9 @@ llm:
   provider: dashscope
   # 为空时读取 .env 中的 MODEL_NAME；仍为空则使用 qwen3-max。
   model: null
-  chunk_size: 40
-  max_workers: 3
+  chunk_size: 20
+  max_workers: 8
+  max_retries: 3
   enable_thinking: false
   api_key_env: API_KEY
   base_url_env: BASE_URL
