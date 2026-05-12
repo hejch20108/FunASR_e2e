@@ -41,6 +41,13 @@ sudo apt update && sudo apt install -y python3-pip && \
 pip install uv
 ```
 
+如果是非 root 用户，执行如下命令，使 uv 生效
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
 ### 3.2 创建虚拟环境
 
 在 `FunASR_e2e` 目录中执行：
