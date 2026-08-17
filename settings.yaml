@@ -30,8 +30,10 @@ funasr:
   vad_model: iic/speech_fsmn_vad_zh-cn-16k-common-pytorch
   punc_model: iic/punc_ct-transformer_cn-en-common-vocab471067-large
   spk_model: iic/speech_campplus_sv_zh-cn_16k-common
+  # null 时由模型自动聚类；明确人数时填写正整数，例如 2。
+  preset_spk_num: null
   # cuda / cpu / mps / xpu / npu。无 GPU 时可改为 cpu。
-  device: cuda
+  device: cpu
   batch_size_s: 300
   batch_size_threshold_s: 60
   max_single_segment_time: 60000
@@ -45,9 +47,9 @@ postprocess:
 llm:
   skip_polish: false
   provider: dashscope
-  # 为空时读取 .env 中的 MODEL_NAME；仍为空则使用 qwen3-max。
+  # 必须保持 null；实际模型严格读取 .env 中的 MODEL_NAME。
   model: null
-  chunk_size: 20
+  chunk_size: 8
   max_workers: 8
   max_retries: 3
   enable_thinking: false
@@ -55,6 +57,36 @@ llm:
   base_url_env: BASE_URL
   model_name_env: MODEL_NAME
   polished_suffix: _polished
+  final_suffix: _final
+  final_audit_suffix: _final_audit
+
+speaker_review:
+  # 只调整说话人归属和原文切片，不改写原始 ASR 字符。
+  enabled: true
+  enable_thinking: false
+  # 必须保持 null，实际模型严格读取 .env 中的 MODEL_NAME。
+  model: null
+  # 高风险片段两侧的只读上下文句数。
+  context_size: 4
+  # 单个高风险连续片段最多包含的核心句数。
+  max_risk_core_sentences: 12
+  # 仅对疑似句内换人的核心句提供的最大边界数。
+  max_boundary_candidates: 16
+  max_workers: 8
+  max_retries: 3
+  request_timeout_s: 90
+  auto_apply_confidence: 0.90
+  # null 时从当前音频的 FunASR 匿名 speaker 标签自动派生。
+  allowed_speakers: null
+  unknown_label: unknown
+  overlap_label: overlap
+  # fail_closed / keep_original。失败时保留当前 FunASR 或已接受的 baseline。
+  failure_policy: keep_original
+  api_key_env: API_KEY
+  base_url_env: BASE_URL
+  model_name_env: MODEL_NAME
+  review_json_suffix: _speaker_review
+  reviewed_suffix: _reviewed
 
 output:
   # true: 每个音频输出到 output/<音频名>/，避免多音频结果混在一起。
