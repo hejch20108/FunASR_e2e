@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from funasr_e2e.pipeline.control import CancelCheck, PipelineCancelled, PipelineEvent, ProgressCallback, check_cancel, report
+
 
 @dataclass
 class Sentence:
@@ -1202,10 +1204,8 @@ def render_final_transcript(paragraphs: list[dict[str, Any]], keep_time: bool) -
     return "\n\n".join(rendered) + ("\n" if rendered else "")
 
 
-def write_final_transcript(
+def generate_final_transcript(
     spans: list[ReviewedSpan],
-    final_path: Path,
-    final_audit_path: Path,
     max_gap_ms: int,
     max_chars: int,
     speaker_prefix: str,
@@ -1218,7 +1218,11 @@ def write_final_transcript(
     chunk_size: int,
     max_retries: int,
     source_json_sha256: str,
-) -> dict[str, Any]:
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> tuple[str, dict[str, Any]]:
+    check_cancel(cancel_check)
     if chunk_size <= 0 or max_retries <= 0:
         raise ValueError("chunk_size 和 max_retries 必须大于 0")
     cleaning_config = load_cleaning_config(prompt_dir)
@@ -1233,6 +1237,7 @@ def write_final_transcript(
         repartitioned_from: int | str | None = None,
         inherited_failures: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        check_cancel(cancel_check)
         base_prompt = build_final_prompt(chunk, speaker_prefix, template)
         prompt_sha256 = sha256_text(base_prompt)
         failure_history = list(inherited_failures or [])
@@ -1241,6 +1246,7 @@ def write_final_transcript(
         retry_error: FinalValidationError | None = None
         failure_category: str | None = None
         for attempt in range(1, max_retries + 1):
+            check_cancel(cancel_check)
             prompt = (
                 build_final_retry_prompt(base_prompt, retry_error)
                 if retry_error is not None else base_prompt
@@ -1260,6 +1266,9 @@ def write_final_transcript(
                     prompt=prompt,
                     enable_thinking=enable_thinking,
                 )
+                check_cancel(cancel_check)
+            except PipelineCancelled:
+                raise
             except Exception as error:
                 last_error = error
                 failure_category = "transport"
@@ -1339,12 +1348,16 @@ def write_final_transcript(
 
     final_paragraphs: list[dict[str, Any]] = []
     chunk_audits = []
+    total_chunks = len(chunks)
     for index, chunk in enumerate(chunks, start=1):
+        check_cancel(cancel_check)
+        report(progress_callback, PipelineEvent(stage="final", event="chunk_started", completed=index - 1, total=total_chunks))
         paragraphs, audits = process_chunk(chunk, index)
         final_paragraphs.extend(paragraphs)
         chunk_audits.extend(audits)
+        report(progress_callback, PipelineEvent(stage="final", event="chunk_completed", completed=index, total=total_chunks))
+    check_cancel(cancel_check)
     final_text = render_final_transcript(final_paragraphs, keep_time)
-    final_path.write_text(final_text, encoding="utf-8")
     final_audit = {
         "schema_version": 2,
         "run": {
@@ -1384,6 +1397,48 @@ def write_final_transcript(
             "final_sha256": sha256_text(final_text),
         },
     }
+    return final_text, final_audit
+
+
+def write_final_transcript(
+    spans: list[ReviewedSpan],
+    final_path: Path,
+    final_audit_path: Path,
+    max_gap_ms: int,
+    max_chars: int,
+    speaker_prefix: str,
+    keep_time: bool,
+    prompt_dir: Path,
+    base_url: str,
+    api_key: str,
+    model: str,
+    enable_thinking: bool,
+    chunk_size: int,
+    max_retries: int,
+    source_json_sha256: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, Any]:
+    final_text, final_audit = generate_final_transcript(
+        spans=spans,
+        max_gap_ms=max_gap_ms,
+        max_chars=max_chars,
+        speaker_prefix=speaker_prefix,
+        keep_time=keep_time,
+        prompt_dir=prompt_dir,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        enable_thinking=enable_thinking,
+        chunk_size=chunk_size,
+        max_retries=max_retries,
+        source_json_sha256=source_json_sha256,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
+    check_cancel(cancel_check)
+    final_path.write_text(final_text, encoding="utf-8")
     final_audit_path.write_text(json.dumps(final_audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return final_audit
 

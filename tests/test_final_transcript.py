@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from postprocess_funasr_transcript import (
     build_reading_units,
     clean_fallback_text,
     extract_fact_locks,
+    generate_final_transcript,
     prepare_reading_units,
     validate_final_response,
     write_final_transcript,
@@ -54,6 +56,40 @@ class FinalTranscriptTest(unittest.TestCase):
 
     def test_extract_fact_locks_ignores_ordinary_one_after_compensation(self):
         self.assertEqual(extract_fact_locks("赔偿金的，这一个算法需要重新核算。"), [])
+
+    def test_generate_final_transcript_returns_both_artifacts_before_writing(self):
+        response = json.dumps({
+            "paragraphs": [{
+                "speaker": "说话人0",
+                "source_unit_ids": ["u0001"],
+                "text": "公司接受补偿方案。",
+            }],
+            "dropped_units": [],
+        }, ensure_ascii=False)
+        events = []
+        with patch("postprocess_funasr_transcript.call_openai_compatible_chat", return_value=response):
+            final_text, audit = generate_final_transcript(
+                spans=[self.span("公司接受补偿方案。", 0)],
+                max_gap_ms=1000,
+                max_chars=100,
+                speaker_prefix="说话人",
+                keep_time=True,
+                prompt_dir=PROJECT_DIR / "prompt",
+                base_url="https://example.invalid",
+                api_key="secret",
+                model="test-model",
+                enable_thinking=False,
+                chunk_size=1,
+                max_retries=1,
+                source_json_sha256="source-hash",
+                progress_callback=events.append,
+            )
+        self.assertIn("公司接受补偿方案。", final_text)
+        self.assertEqual(audit["integrity"]["final_sha256"], hashlib.sha256(final_text.encode("utf-8")).hexdigest())
+        self.assertEqual([(event.event, event.completed, event.total) for event in events], [
+            ("chunk_started", 0, 1),
+            ("chunk_completed", 1, 1),
+        ])
 
     def test_build_reading_units_merges_same_speaker_without_crossing_turn(self):
         spans = [

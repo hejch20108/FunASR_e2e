@@ -14,21 +14,24 @@ for path in (SCRIPT_DIR, PROJECT_DIR, FUNASR_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from funasr import AutoModel
 from postprocess_funasr_transcript import (
     ReviewedSpan,
     Sentence,
     load_cleaning_config,
     load_env_file,
-    load_sentences,
     merge_sentences,
     render_blocks,
     render_evidence_transcript,
-    review_sentences,
-    reviewed_spans_from_audit,
-    write_final_transcript,
 )
-from review_funasr_speakers import run_speaker_review, sha256_file, write_speaker_review_outputs
+from review_funasr_speakers import sha256_file
+from funasr_e2e.pipeline.service import (
+    LLMCredentials,
+    generate_cleaned_stage,
+    generate_evidence_stage,
+    generate_final_stage,
+    run_funasr_stage,
+    run_speaker_review_stage,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -290,7 +293,9 @@ def load_api_credentials(
     return api_key, base_url, model
 
 
-def build_model(settings: dict[str, Any]) -> AutoModel:
+def build_model(settings: dict[str, Any]) -> Any:
+    from funasr import AutoModel
+
     funasr_config = settings["funasr"]
     return AutoModel(
         model=funasr_config["model"],
@@ -304,7 +309,7 @@ def build_model(settings: dict[str, Any]) -> AutoModel:
 
 def process_one_audio(
     audio_path: Path,
-    model: AutoModel | None,
+    model: Any | None,
     settings: dict[str, Any],
     project_dir: Path,
     reuse_json: bool,
@@ -335,16 +340,6 @@ def process_one_audio(
 
     preset_spk_num = get_preset_spk_num(funasr_config.get("preset_spk_num"))
     hotwords = load_hotwords(prompt_dir)
-    generate_kwargs: dict[str, Any] = {
-        "input": str(audio_path),
-        "batch_size_s": funasr_config["batch_size_s"],
-        "batch_size_threshold_s": funasr_config["batch_size_threshold_s"],
-    }
-    if preset_spk_num is not None:
-        generate_kwargs["preset_spk_num"] = preset_spk_num
-    if hotwords:
-        generate_kwargs["hotword"] = " ".join(hotwords)
-
     if reuse_json:
         if not json_path.exists():
             raise FileNotFoundError(f"--reuse-json 指定的 FunASR JSON 不存在：{json_path}")
@@ -352,26 +347,30 @@ def process_one_audio(
     else:
         if model is None:
             raise RuntimeError("未提供 FunASR 模型")
+        if json_path.exists() and not output_config["overwrite"]:
+            raise FileExistsError(f"输出文件已存在且 overwrite=false：{json_path}")
         print(f"正在转写音频：{audio_path}", flush=True)
         if preset_spk_num is None:
             print("说话人数：自动聚类", flush=True)
         else:
             print(f"说话人数：指定 {preset_spk_num} 人", flush=True)
         print(f"有效热词数量：{len(hotwords)}", flush=True)
-        result = model.generate(**generate_kwargs)
-        dump_json_output(result, json_path, output_config["overwrite"])
+        run_funasr_stage(
+            audio_path=audio_path,
+            raw_json_path=json_path,
+            model=model,
+            funasr_config=funasr_config,
+            prompt_dir=prompt_dir,
+        )
         print(f"FunASR JSON 输出：{json_path}", flush=True)
 
-    sentences = load_sentences(json_path)
-    if not sentences:
-        raise SystemExit(f"没有从 FunASR JSON 中解析到 sentence_info：{json_path}")
-    review_sentences(sentences)
-    write_evidence_transcript(
-        sentences,
-        evidence_path,
-        postprocess_config["speaker_prefix"],
-        postprocess_config["keep_time"],
-        output_config["overwrite"],
+    if evidence_path.exists() and not output_config["overwrite"]:
+        raise FileExistsError(f"输出文件已存在且 overwrite=false：{evidence_path}")
+    sentences = generate_evidence_stage(
+        raw_json_path=json_path,
+        evidence_path=evidence_path,
+        speaker_prefix=postprocess_config["speaker_prefix"],
+        keep_time=postprocess_config["keep_time"],
     )
     print(f"读取句段：{len(sentences)}", flush=True)
     print(f"证据稿输出：{evidence_path}", flush=True)
@@ -388,18 +387,16 @@ def process_one_audio(
             raise FileExistsError(f"输出文件已存在且 overwrite=false：{reviewed_path}")
         review_api_key, review_base_url, review_model = load_api_credentials(project_dir, paths, speaker_review_config)
         print("正在进行语义说话人复核...", flush=True)
-        review_result = run_speaker_review(
-            json_path=json_path,
-            sentences=sentences,
+        review_stage = run_speaker_review_stage(
+            raw_json_path=json_path,
+            speaker_review_path=review_json_path,
+            reviewed_path=reviewed_path,
             prompt_dir=prompt_dir,
-            config=speaker_review_config,
-            base_url=review_base_url,
-            api_key=review_api_key,
-            default_model=review_model,
-            speaker_prefix=postprocess_config["speaker_prefix"],
-            keep_time=postprocess_config["keep_time"],
+            speaker_review_config=speaker_review_config,
+            postprocess_config=postprocess_config,
+            credentials=LLMCredentials(review_api_key, review_base_url, review_model),
         )
-        write_speaker_review_outputs(review_result, review_json_path, reviewed_path)
+        review_result = review_stage.review_result
         transcript_items = review_result.spans
         integrity = review_result.audit["integrity"]
         print(f"speaker review 输出：{review_json_path}", flush=True)
@@ -417,16 +414,26 @@ def process_one_audio(
             flush=True,
         )
 
-    block_count = write_cleaned_transcript(
-        transcript_items,
-        cleaned_path,
-        postprocess_config["max_gap_ms"],
-        postprocess_config["max_chars"],
-        postprocess_config["speaker_prefix"],
-        postprocess_config["keep_time"],
-        prompt_dir,
-        output_config["overwrite"],
-    )
+    if cleaned_path.exists() and not output_config["overwrite"]:
+        raise FileExistsError(f"输出文件已存在且 overwrite=false：{cleaned_path}")
+    if review_result is None:
+        block_count = write_cleaned_transcript(
+            transcript_items,
+            cleaned_path,
+            postprocess_config["max_gap_ms"],
+            postprocess_config["max_chars"],
+            postprocess_config["speaker_prefix"],
+            postprocess_config["keep_time"],
+            prompt_dir,
+            output_config["overwrite"],
+        )
+    else:
+        block_count = generate_cleaned_stage(
+            speaker_review_path=review_json_path,
+            cleaned_path=cleaned_path,
+            prompt_dir=prompt_dir,
+            postprocess_config=postprocess_config,
+        )
     print(f"合并段落：{block_count}", flush=True)
     print(f"cleaned 输出：{cleaned_path}", flush=True)
 
@@ -447,22 +454,15 @@ def process_one_audio(
         raise FileExistsError(f"最终阅读版输出已存在且 overwrite=false：{final_path}")
 
     api_key, base_url, llm_model = load_api_credentials(project_dir, paths, llm_config)
-    final_audit = write_final_transcript(
-        spans=review_result.spans,
+    final_audit = generate_final_stage(
+        raw_json_path=json_path,
+        speaker_review_path=review_json_path,
         final_path=final_path,
         final_audit_path=final_audit_path,
-        max_gap_ms=postprocess_config["max_gap_ms"],
-        max_chars=postprocess_config["max_chars"],
-        speaker_prefix=postprocess_config["speaker_prefix"],
-        keep_time=postprocess_config["keep_time"],
         prompt_dir=prompt_dir,
-        base_url=base_url,
-        api_key=api_key,
-        model=llm_model,
-        enable_thinking=llm_config["enable_thinking"],
-        chunk_size=llm_config["chunk_size"],
-        max_retries=llm_config["max_retries"],
-        source_json_sha256=sha256_file(json_path),
+        postprocess_config=postprocess_config,
+        llm_config=llm_config,
+        credentials=LLMCredentials(api_key, base_url, llm_model),
     )
     print(f"LLM provider：{llm_config['provider']}", flush=True)
     print(f"LLM model：{llm_model}", flush=True)
@@ -519,22 +519,15 @@ def polish_one_audio(audio_path: Path, settings: dict[str, Any], project_dir: Pa
     if (final_path.exists() or final_audit_path.exists()) and not output_config["overwrite"]:
         raise FileExistsError(f"最终阅读版输出已存在且 overwrite=false：{final_path}")
     api_key, base_url, llm_model = load_api_credentials(project_dir, paths, llm_config)
-    final_audit = write_final_transcript(
-        spans=reviewed_spans_from_audit(audit),
+    final_audit = generate_final_stage(
+        raw_json_path=json_path,
+        speaker_review_path=review_json_path,
         final_path=final_path,
         final_audit_path=final_audit_path,
-        max_gap_ms=settings["postprocess"]["max_gap_ms"],
-        max_chars=settings["postprocess"]["max_chars"],
-        speaker_prefix=settings["postprocess"]["speaker_prefix"],
-        keep_time=settings["postprocess"]["keep_time"],
         prompt_dir=prompt_dir,
-        base_url=base_url,
-        api_key=api_key,
-        model=llm_model,
-        enable_thinking=llm_config["enable_thinking"],
-        chunk_size=llm_config["chunk_size"],
-        max_retries=llm_config["max_retries"],
-        source_json_sha256=sha256_file(json_path),
+        postprocess_config=settings["postprocess"],
+        llm_config=llm_config,
+        credentials=LLMCredentials(api_key, base_url, llm_model),
     )
     print(f"LLM provider：{llm_config['provider']}", flush=True)
     print(f"LLM model：{llm_model}", flush=True)

@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+class ErrorBody(BaseModel):
+    code: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorBody
+
+
+class HealthResponse(BaseModel):
+    worker_running: bool

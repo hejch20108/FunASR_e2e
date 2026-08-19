@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "funasr-e2e"
+version = "0.1.0"
+description = "带审计链的本机 FunASR 转写服务"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "python-multipart>=0.0.9,<1",
+  "PyYAML>=6,<7",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.27,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["funasr_e2e*", "scripts*"]
+
+[tool.setuptools.package-data]
+"funasr_e2e.persistence" = ["migrations/*.sql"]

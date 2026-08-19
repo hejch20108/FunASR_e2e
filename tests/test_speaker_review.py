@@ -30,12 +30,14 @@ from review_funasr_speakers import (
     normalize_review_config,
     normalize_segment_decision,
     run_risk_segment_pass,
+    run_speaker_review,
     sha256_file,
     validate_decision_response,
     validate_full_review_response,
     validate_risk_segment_response,
     validate_spans,
 )
+from funasr_e2e.pipeline.control import PipelineCancelled
 from run_funasr_full_pipeline import default_settings, load_api_credentials, polish_one_audio
 
 
@@ -219,6 +221,45 @@ class SpeakerReviewTest(unittest.TestCase):
             )
         self.assertTrue(result)
         self.assertTrue(all(request["enable_thinking"] for request in requests))
+
+    def test_cancellation_is_not_converted_to_retry_or_fallback(self):
+        def cancel() -> None:
+            raise PipelineCancelled()
+
+        with patch("review_funasr_speakers.call_openai_compatible_chat") as call:
+            with self.assertRaises(PipelineCancelled):
+                call_json_with_retries(
+                    base_url="https://example.invalid",
+                    api_key="secret",
+                    model="test",
+                    prompt="test",
+                    max_retries=2,
+                    timeout_seconds=90,
+                    validator=lambda payload: payload,
+                    cancel_check=cancel,
+                )
+        call.assert_not_called()
+
+    def test_run_speaker_review_propagates_cancellation(self):
+        sentence = self.make_sentence("甲", 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            json_path = Path(directory) / "source.json"
+            json_path.write_text(json.dumps([{"sentence_info": [{
+                "text": "甲", "start": 100, "end": 1000, "spk": 0,
+            }]}], ensure_ascii=False), encoding="utf-8")
+            with patch("review_funasr_speakers.run_full_review", side_effect=PipelineCancelled()):
+                with self.assertRaises(PipelineCancelled):
+                    run_speaker_review(
+                        json_path=json_path,
+                        sentences=[sentence],
+                        prompt_dir=PROJECT_DIR / "prompt",
+                        config={},
+                        base_url="https://example.invalid",
+                        api_key="secret",
+                        default_model="test-model",
+                        speaker_prefix="说话人",
+                        keep_time=True,
+                    )
 
     def test_failure_policy_fallback(self):
         sentence = self.make_sentence()
@@ -803,7 +844,7 @@ class SpeakerReviewTest(unittest.TestCase):
             )
             (output_dir / "sample_reviewed.txt").write_text("reviewed", encoding="utf-8")
             (output_dir / "sample_cleaned.txt").write_text("cleaned", encoding="utf-8")
-            with patch("run_funasr_full_pipeline.write_final_transcript") as write_final:
+            with patch("run_funasr_full_pipeline.generate_final_stage") as write_final:
                 with self.assertRaisesRegex(RuntimeError, "schema v3"):
                     polish_one_audio(audio_path, settings, root)
             write_final.assert_not_called()
@@ -862,7 +903,7 @@ class SpeakerReviewTest(unittest.TestCase):
             stale_path = output_dir / "sample_final.txt"
             stale_path.write_text("stale", encoding="utf-8")
             with patch(
-                "run_funasr_full_pipeline.write_final_transcript",
+                "run_funasr_full_pipeline.generate_final_stage",
                 side_effect=RuntimeError("请求失败"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "请求失败"):

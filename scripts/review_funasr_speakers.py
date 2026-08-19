@@ -7,13 +7,24 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from postprocess_funasr_transcript import (
-    ReviewedSpan,
-    Sentence,
-    call_openai_compatible_chat,
-    format_time,
-    normalize_speaker,
-)
+from funasr_e2e.pipeline.control import CancelCheck, PipelineCancelled, PipelineEvent, ProgressCallback, check_cancel, report
+
+try:
+    from .postprocess_funasr_transcript import (
+        ReviewedSpan,
+        Sentence,
+        call_openai_compatible_chat,
+        format_time,
+        normalize_speaker,
+    )
+except ImportError:
+    from postprocess_funasr_transcript import (
+        ReviewedSpan,
+        Sentence,
+        call_openai_compatible_chat,
+        format_time,
+        normalize_speaker,
+    )
 
 
 OPERATIONS = {"KEEP", "REASSIGN", "SPLIT", "REVIEW_REQUIRED", "OVERLAP"}
@@ -222,10 +233,12 @@ def call_json_with_retries(
     validator: Callable[[dict[str, Any]], Any],
     timeout_seconds: int,
     enable_thinking: bool = False,
+    cancel_check: CancelCheck | None = None,
 ) -> Any:
     last_error: Exception | None = None
     retry_prompt = prompt
     for attempt in range(1, max_retries + 1):
+        check_cancel(cancel_check)
         try:
             response = call_openai_compatible_chat(
                 base_url=base_url,
@@ -236,7 +249,10 @@ def call_json_with_retries(
                 response_format={"type": "json_object"},
                 timeout_seconds=timeout_seconds,
             )
+            check_cancel(cancel_check)
             return validator(parse_json_response(response))
+        except PipelineCancelled:
+            raise
         except Exception as error:
             last_error = error
             if attempt < max_retries:
@@ -523,7 +539,12 @@ def run_full_review(
     base_url: str,
     api_key: str,
     model: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    check_cancel(cancel_check)
+    report(progress_callback, PipelineEvent(stage="speaker_review", event="full_review_started", completed=0, total=1))
     prompt = build_review_prompt(
         template,
         build_full_review_input(
@@ -541,6 +562,7 @@ def run_full_review(
         max_retries=config["max_retries"],
         timeout_seconds=config["request_timeout_s"],
         enable_thinking=config["enable_thinking"],
+        cancel_check=cancel_check,
         validator=lambda payload: validate_full_review_response(
             payload,
             sentences,
@@ -551,6 +573,7 @@ def run_full_review(
         ),
     )
     print("完成全稿说话人复核", flush=True)
+    report(progress_callback, PipelineEvent(stage="speaker_review", event="full_review_completed", completed=1, total=1))
     return result, {
         "request_id": "full-review-0001",
         "mode": "full_review",
@@ -1320,7 +1343,11 @@ def run_risk_segment_pass(
     base_url: str,
     api_key: str,
     model: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    check_cancel(cancel_check)
     results: dict[str, dict[str, Any]] = {}
     raw_results: dict[str, dict[str, Any]] = {}
     audits: list[dict[str, Any]] = []
@@ -1335,6 +1362,7 @@ def run_risk_segment_pass(
         set[str],
         dict[str, str],
     ]:
+        check_cancel(cancel_check)
         core_sentences = [sentences[index] for index in segment.core_indexes]
         candidates, split_source_ids, split_eligibility = build_segment_candidates(sentences, segment, signals, config)
         prompt = build_review_prompt(
@@ -1352,6 +1380,7 @@ def run_risk_segment_pass(
                 max_retries=config["max_retries"],
                 timeout_seconds=config["request_timeout_s"],
                 enable_thinking=config["enable_thinking"],
+                cancel_check=cancel_check,
                 validator=lambda payload: validate_risk_segment_response(
                     payload,
                     core_sentences,
@@ -1364,6 +1393,8 @@ def run_risk_segment_pass(
             )
             print(f"完成高风险片段 {segment.segment_id}", flush=True)
             return segment, value, sha256_bytes(prompt.encode("utf-8")), prompt_bytes, candidates, split_source_ids, split_eligibility
+        except PipelineCancelled:
+            raise
         except Exception as error:
             return (
                 segment,
@@ -1375,14 +1406,24 @@ def run_risk_segment_pass(
                 split_eligibility,
             )
 
+    total = len(executable)
     if executable:
-        print(f"需要复核的高风险连续片段数：{len(executable)}", flush=True)
-    workers = min(config["max_workers"], len(executable))
+        print(f"需要复核的高风险连续片段数：{total}", flush=True)
+        report(progress_callback, PipelineEvent(stage="speaker_review", event="risk_segments_started", completed=0, total=total))
+    workers = min(config["max_workers"], total)
+    completed = []
     if workers <= 1:
-        completed = [execute(segment) for segment in executable]
+        for segment in executable:
+            check_cancel(cancel_check)
+            completed.append(execute(segment))
+            report(progress_callback, PipelineEvent(stage="speaker_review", event="risk_segment_completed", completed=len(completed), total=total))
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            completed = list(executor.map(execute, executable))
+            futures = [executor.submit(execute, segment) for segment in executable]
+            for future in concurrent.futures.as_completed(futures):
+                check_cancel(cancel_check)
+                completed.append(future.result())
+                report(progress_callback, PipelineEvent(stage="speaker_review", event="risk_segment_completed", completed=len(completed), total=total))
     for segment, value, prompt_sha256, prompt_bytes, candidates, split_source_ids, split_eligibility in completed:
         core_sentences = [sentences[index] for index in segment.core_indexes]
         audit = {
@@ -1583,7 +1624,10 @@ def run_speaker_review(
     default_model: str,
     speaker_prefix: str,
     keep_time: bool,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> SpeakerReviewResult:
+    check_cancel(cancel_check)
     if not sentences:
         raise ValueError("没有可供说话人复核的源句")
     normalized_config = normalize_review_config(config, sentences)
@@ -1597,7 +1641,14 @@ def run_speaker_review(
     full_error = None
     try:
         full_result, full_audit = run_full_review(
-            sentences, normalized_config, template, base_url, api_key, default_model
+            sentences,
+            normalized_config,
+            template,
+            base_url,
+            api_key,
+            default_model,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
         )
         baseline, forced_indexes = build_full_baseline(sentences, full_result["overrides"], normalized_config)
         signals = collect_risk_signals(sentences, full_result, forced_indexes)
@@ -1613,7 +1664,11 @@ def run_speaker_review(
             base_url,
             api_key,
             default_model,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
         )
+    except PipelineCancelled:
+        raise
     except Exception as error:
         full_error = error
         if normalized_config["failure_policy"] == "fail_closed":
@@ -1641,6 +1696,7 @@ def run_speaker_review(
         }
         segment_audits = []
 
+    check_cancel(cancel_check)
     final_decisions = dict(baseline)
     final_decisions.update(segment_decisions)
     unreviewed_high_impact_guards = apply_unreviewed_high_impact_keep_guard(
@@ -1792,6 +1848,8 @@ def run_speaker_review(
             **integrity,
         },
     }
+    check_cancel(cancel_check)
+    report(progress_callback, PipelineEvent(stage="speaker_review", event="review_completed", details={"review_queue_count": len(review_queue)}))
     return SpeakerReviewResult(spans=spans, audit=audit, reviewed_text=render_reviewed_transcript(spans, speaker_prefix, keep_time))
 
 
